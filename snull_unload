@@ -1,0 +1,4 @@
+#!/bin/sh
+
+/sbin/ifconfig eth0 down
+/sbin/rmmod snull
