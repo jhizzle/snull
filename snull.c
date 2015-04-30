@@ -174,16 +174,6 @@ void snull_teardown_pool(struct net_device *dev)
 }    
 
 /*
- * Enable and disable receive interrupts.
- */
-static void snull_rx_ints(struct net_device *dev, int enable)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-	priv->rx_int_enabled = enable;
-}
-
-    
-/*
  * Open and close
  */
 
@@ -239,9 +229,14 @@ int snull_header(struct sk_buff *skb, struct net_device *dev,
 	return (dev->hard_header_len);
 }
 
+static netdev_tx_t snull_start_xmit(struct sk_buff *skb, struct net_device *dev) {
+	netif_stop_queue(dev); /* can't transmit any more */
+    return NETDEV_TX_BUSY;
+}
 static const struct net_device_ops snull_netdev_ops = {
     .ndo_open       = snull_open,
     .ndo_stop       = snull_release,
+    .ndo_start_xmit = snull_start_xmit,
 };
 
 static const struct header_ops snull_header_ops = {
@@ -286,8 +281,6 @@ void snull_init(struct net_device *dev)
 	priv = netdev_priv(dev);
 	memset(priv, 0, sizeof(struct snull_priv));
 	spin_lock_init(&priv->lock);
-	snull_rx_ints(dev, 1);		/* enable receive interrupts */
-	snull_setup_pool(dev);
 }
 
 /*
