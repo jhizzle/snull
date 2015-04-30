@@ -85,9 +85,7 @@ void convert_mac_addrs(void) {
     int i, j;
 
     for (i = 0; i < num_mac_addrs; i++) {
-        printk("MAC: %d\n", i);
         for (j = 0; j < ETH_ALEN; j++) {
-            printk("  converted: %02x\n", ascii_to_byte(&mac_addrs[i][j * 2]));
             converted_mac_addrs[i][j] = ascii_to_byte(&mac_addrs[i][j * 2]);
         }
     }
@@ -324,7 +322,6 @@ void snull_cleanup(void)
 int snull_init_module(void)
 {
 	int result, i, ret = -ENOMEM;
-    int j;
 
     printk("There are %d mac addresses\n", num_mac_addrs);
 	ret = -ENODEV;
@@ -336,9 +333,6 @@ int snull_init_module(void)
 
     for (i = 0; i < num_mac_addrs; i++) {
         printk(" addr: %s\n", mac_addrs[i]);
-        for (j = 0; j < ETH_ALEN; j++)
-            printk("   %02x\n", 0xff & converted_mac_addrs[i][j]);
-
     }
 
 	/* Allocate the devices */
