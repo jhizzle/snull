@@ -38,7 +38,7 @@
 #include <linux/in6.h>
 #include <asm/checksum.h>
 
-MODULE_AUTHOR("Alessandro Rubini, Jonathan Corbet");
+MODULE_AUTHOR("Alessandro Rubini, Jonathan Corbet, Jay Hirata");
 MODULE_LICENSE("Dual BSD/GPL");
 
 #define MAC_ADDR    { 0xc4, 0xd4, 0x89, 0xfb, 0xf8, 0xab }
@@ -569,23 +569,10 @@ void snull_init(struct net_device *dev)
 
     dev->netdev_ops = &snull_netdev_ops;
     dev->header_ops = &snull_header_ops;
-
-	//dev->open            = snull_open;
-	//dev->stop            = snull_release;
-	//dev->set_config      = snull_config;
-	//dev->hard_start_xmit = snull_tx;
-	//dev->do_ioctl        = snull_ioctl;
-	//dev->get_stats       = snull_stats;
-	//dev->change_mtu      = snull_change_mtu;  
-	/* dev->rebuild_header  = snull_rebuild_header; */
-	/* dev->hard_header     = snull_header; */
-	//dev->tx_timeout      = snull_tx_timeout;
 	dev->watchdog_timeo = timeout;
 
 	/* keep the default flags, just add NOARP */
 	dev->flags           |= IFF_NOARP;
-	//dev->features        |= NETIF_F_NO_CSUM;
-	/* dev->hard_header_cache = NULL;*/      /* Disable caching */
 
 	/*
 	 * Then, initialize the priv field. This encloses the statistics
