@@ -88,7 +88,7 @@ void convert_mac_addrs(void) {
         printk("MAC: %d\n", i);
         for (j = 0; j < ETH_ALEN; j++) {
             printk("  converted: %02x\n", ascii_to_byte(&mac_addrs[i][j * 2]));
-            //converted_mac_addrs[i][j] = ascii_to_byte(&mac_addrs[i][j * 2]);
+            converted_mac_addrs[i][j] = ascii_to_byte(&mac_addrs[i][j * 2]);
         }
     }
 }
@@ -253,18 +253,15 @@ static void snull_rx_ints(struct net_device *dev, int enable)
 
 int snull_open(struct net_device *dev)
 {
-    char mac_addr[] = MAC_ADDR;
-	/* request_region(), request_irq(), ....  (like fops->open) */
+    int i;
 
-	/* 
-	 * Assign the hardware address of the board: use "\0SNULx", where
-	 * x is 0 or 1. The first byte is '\0' to avoid being a multicast
-	 * address (the first byte of multicast addrs is odd).
-	 */
-	//memcpy(dev->dev_addr, "\0SNUL0", ETH_ALEN);
-	memcpy(dev->dev_addr, mac_addr, ETH_ALEN);
-	if (dev == snull_devs[1])
-		dev->dev_addr[ETH_ALEN-1]++; /* \0SNUL1 */
+    /* Find the matching device */
+    for (i = 0; i < num_mac_addrs; i++) {
+        if (dev == snull_devs[i])
+            break;
+    }
+
+	memcpy(dev->dev_addr, converted_mac_addrs[i], ETH_ALEN);
 	netif_start_queue(dev);
 	return 0;
 }
@@ -384,115 +381,11 @@ static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 /*
- * Transmit a packet (low level interface)
- */
-static void snull_hw_tx(char *buf, int len, struct net_device *dev)
-{
-	/*
-	 * This function deals with hw details. This interface loops
-	 * back the packet to the other snull interface (if any).
-	 * In other words, this function implements the snull behaviour,
-	 * while all other procedures are rather device-independent
-	 */
-	struct iphdr *ih;
-	struct net_device *dest;
-	struct snull_priv *priv;
-	u32 *saddr, *daddr;
-	struct snull_packet *tx_buffer;
-    
-	/* I am paranoid. Ain't I? */
-	if (len < sizeof(struct ethhdr) + sizeof(struct iphdr)) {
-		printk("snull: Hmm... packet too short (%i octets)\n",
-				len);
-		return;
-	}
-
-	if (0) { /* enable this conditional to look at the data */
-		int i;
-		PDEBUG("len is %i\n" KERN_DEBUG "data:",len);
-		for (i=14 ; i<len; i++)
-			printk(" %02x",buf[i]&0xff);
-		printk("\n");
-	}
-	/*
-	 * Ethhdr is 14 bytes, but the kernel arranges for iphdr
-	 * to be aligned (i.e., ethhdr is unaligned)
-	 */
-	ih = (struct iphdr *)(buf+sizeof(struct ethhdr));
-	saddr = &ih->saddr;
-	daddr = &ih->daddr;
-
-	((u8 *)saddr)[2] ^= 1; /* change the third octet (class C) */
-	((u8 *)daddr)[2] ^= 1;
-
-	ih->check = 0;         /* and rebuild the checksum (ip needs it) */
-	ih->check = ip_fast_csum((unsigned char *)ih,ih->ihl);
-
-	if (dev == snull_devs[0])
-		PDEBUGG("%08x:%05i --> %08x:%05i\n",
-				ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source),
-				ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest));
-	else
-		PDEBUGG("%08x:%05i <-- %08x:%05i\n",
-				ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest),
-				ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source));
-
-	/*
-	 * Ok, now the packet is ready for transmission: first simulate a
-	 * receive interrupt on the twin device, then  a
-	 * transmission-done on the transmitting device
-	 */
-	dest = snull_devs[dev == snull_devs[0] ? 1 : 0];
-	priv = netdev_priv(dest);
-	tx_buffer = snull_get_tx_buffer(dev);
-	tx_buffer->datalen = len;
-	memcpy(tx_buffer->data, buf, len);
-	snull_enqueue_buf(dest, tx_buffer);
-	if (priv->rx_int_enabled) {
-		priv->status |= SNULL_RX_INTR;
-		snull_interrupt(0, dest, NULL);
-	}
-
-	priv = netdev_priv(dev);
-	priv->tx_packetlen = len;
-	priv->tx_packetdata = buf;
-	priv->status |= SNULL_TX_INTR;
-	if (lockup && ((priv->stats.tx_packets + 1) % lockup) == 0) {
-        	/* Simulate a dropped transmit interrupt */
-		netif_stop_queue(dev);
-		PDEBUG("Simulate lockup at %ld, txp %ld\n", jiffies,
-				(unsigned long) priv->stats.tx_packets);
-	}
-	else
-		snull_interrupt(0, dev, NULL);
-}
-
-/*
  * Transmit a packet (called by the kernel)
  */
 int snull_tx(struct sk_buff *skb, struct net_device *dev)
 {
-	int len;
-	char *data, shortpkt[ETH_ZLEN];
-	struct snull_priv *priv = netdev_priv(dev);
-	
-	data = skb->data;
-	len = skb->len;
-	if (len < ETH_ZLEN) {
-		memset(shortpkt, 0, ETH_ZLEN);
-		memcpy(shortpkt, skb->data, skb->len);
-		len = ETH_ZLEN;
-		data = shortpkt;
-	}
-	dev->trans_start = jiffies; /* save the timestamp */
-
-	/* Remember the skb, so we can free it at interrupt time */
-	priv->skb = skb;
-
-	/* actual deliver of data is device-specific, and not shown here */
-	snull_hw_tx(data, len, dev);
-
-	return 0; /* Our simple device can not fail */
+    return 0;
 }
 
 /*
@@ -590,11 +483,11 @@ int snull_change_mtu(struct net_device *dev, int new_mtu)
 static const struct net_device_ops snull_netdev_ops = {
     .ndo_open       = snull_open,
     .ndo_stop       = snull_release,
-    .ndo_set_config = snull_config,
-    .ndo_start_xmit = snull_tx,
-    .ndo_do_ioctl   = snull_ioctl,
-    .ndo_get_stats  = snull_stats,
-    .ndo_tx_timeout = snull_tx_timeout,
+    //.ndo_set_config = snull_config,
+    //.ndo_start_xmit = snull_tx,
+    //.ndo_do_ioctl   = snull_ioctl,
+    //.ndo_get_stats  = snull_stats,
+    //.ndo_tx_timeout = snull_tx_timeout,
 };
 
 static const struct header_ops snull_header_ops = {
@@ -647,7 +540,7 @@ void snull_init(struct net_device *dev)
  * The devices
  */
 
-struct net_device *snull_devs[2];
+struct net_device *snull_devs[MAX_MACS];
 
 
 
@@ -659,7 +552,7 @@ void snull_cleanup(void)
 {
 	int i;
     
-	for (i = 0; i < 2;  i++) {
+	for (i = 0; i < num_mac_addrs;  i++) {
 		if (snull_devs[i]) {
 			unregister_netdev(snull_devs[i]);
 			snull_teardown_pool(snull_devs[i]);
@@ -688,31 +581,33 @@ int snull_init_module(void)
     for (i = 0; i < num_mac_addrs; i++) {
         printk(" addr: %s\n", mac_addrs[i]);
         for (j = 0; j < ETH_ALEN; j++)
-            printk("   %02x\n", converted_mac_addrs[i][j]);
+            printk("   %02x\n", 0xff & converted_mac_addrs[i][j]);
 
     }
 
 	snull_interrupt = snull_regular_interrupt;
 
 	/* Allocate the devices */
-	snull_devs[0] = alloc_netdev(sizeof(struct snull_priv), "eth%d",
-			snull_init);
-	snull_devs[1] = alloc_netdev(sizeof(struct snull_priv), "sn%d",
-			snull_init);
-	if (snull_devs[0] == NULL || snull_devs[1] == NULL)
-		goto out;
+    ret = -ENODEV;
+    for (i = 0; i < num_mac_addrs; i++) {
+        snull_devs[i] = alloc_netdev(sizeof(struct snull_priv), "eth%d", snull_init);
+        if (snull_devs[i] == NULL)
+            goto out;
 
-	ret = -ENODEV;
-	for (i = 0; i < 2;  i++)
-		if ((result = register_netdev(snull_devs[i])))
-			printk("snull: error %i registering device \"%s\"\n",
-					result, snull_devs[i]->name);
-		else
-			ret = 0;
+    }
+
+    ret = -ENODEV;
+    for (i = 0; i < num_mac_addrs;  i++) {
+        if ((result = register_netdev(snull_devs[i])))
+            printk("snull: error %i registering device \"%s\"\n", result, snull_devs[i]->name);
+        else
+            ret = 0;
+    }
+
 out:
-	if (ret) 
-		snull_cleanup();
-	return ret;
+    if (ret) 
+        snull_cleanup();
+    return ret;
 }
 
 
