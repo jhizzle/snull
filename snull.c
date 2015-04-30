@@ -43,6 +43,64 @@ MODULE_LICENSE("Dual BSD/GPL");
 
 #define MAC_ADDR    { 0xc4, 0xd4, 0x89, 0xfb, 0xf8, 0xab }
 
+#define MAX_MACS                    20
+static int num_mac_addrs = 0;
+static char *mac_addrs[MAX_MACS] = { [0 ... (MAX_MACS - 1)] = NULL };
+static char converted_mac_addrs[MAX_MACS][ETH_ALEN];
+
+int ascii_char_to_int(char c) {
+    int result = -1;
+
+    if (c >= '0' && c <= '9')
+        result = c - '0';
+    else if (c >= 'a' && c <= 'f')
+        result = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F')
+        result = c - 'A' + 10;
+
+    return result;
+}
+
+unsigned char ascii_to_byte(char *str) {
+    unsigned char byte = 0;
+    int i;
+
+    i = ascii_char_to_int(str[0]);
+    if (i < 0)
+        return 0;
+
+    byte = (i << 4) & 0xff;
+
+    i = ascii_char_to_int(str[1]);
+    if (i < 0)
+        return 0;
+
+    byte |= i & 0xff;
+
+    return byte;
+}
+
+
+void convert_mac_addrs(void) {
+    int i, j;
+
+    for (i = 0; i < num_mac_addrs; i++) {
+        printk("MAC: %d\n", i);
+        for (j = 0; j < ETH_ALEN; j++) {
+            printk("  converted: %02x\n", ascii_to_byte(&mac_addrs[i][j * 2]));
+            //converted_mac_addrs[i][j] = ascii_to_byte(&mac_addrs[i][j * 2]);
+        }
+    }
+}
+
+
+
+
+/*
+ * MAC addresses of devices to use.
+ */
+module_param_array(mac_addrs, charp, &num_mac_addrs, 0);
+
 /*
  * Transmitter lockup simulation, normally disabled.
  */
