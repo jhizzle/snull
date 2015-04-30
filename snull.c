@@ -141,7 +141,6 @@ struct snull_priv {
 	spinlock_t lock;
 };
 
-static void snull_tx_timeout(struct net_device *dev);
 static void (*snull_interrupt)(int, void *, struct pt_regs *);
 
 /*
@@ -275,30 +274,6 @@ int snull_release(struct net_device *dev)
 }
 
 /*
- * Configuration changes (passed on by ifconfig)
- */
-int snull_config(struct net_device *dev, struct ifmap *map)
-{
-	if (dev->flags & IFF_UP) /* can't act on a running interface */
-		return -EBUSY;
-
-	/* Don't allow changing the I/O address */
-	if (map->base_addr != dev->base_addr) {
-		printk(KERN_WARNING "snull: Can't change I/O address\n");
-		return -EOPNOTSUPP;
-	}
-
-	/* Allow changing the IRQ */
-	if (map->irq != dev->irq) {
-		dev->irq = map->irq;
-        	/* request_irq() is delayed to open-time */
-	}
-
-	/* ignore other fields */
-	return 0;
-}
-
-/*
  * Receive a packet: retrieve, encapsulate and pass over to upper levels
  */
 void snull_rx(struct net_device *dev, struct snull_packet *pkt)
@@ -381,51 +356,6 @@ static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 /*
- * Transmit a packet (called by the kernel)
- */
-int snull_tx(struct sk_buff *skb, struct net_device *dev)
-{
-    return 0;
-}
-
-/*
- * Deal with a transmit timeout.
- */
-void snull_tx_timeout (struct net_device *dev)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-
-	PDEBUG("Transmit timeout at %ld, latency %ld\n", jiffies,
-			jiffies - dev->trans_start);
-        /* Simulate a transmission interrupt to get things moving */
-	priv->status = SNULL_TX_INTR;
-	snull_interrupt(0, dev, NULL);
-	priv->stats.tx_errors++;
-	netif_wake_queue(dev);
-	return;
-}
-
-
-
-/*
- * Ioctl commands 
- */
-int snull_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
-{
-	PDEBUG("ioctl\n");
-	return 0;
-}
-
-/*
- * Return statistics to the caller
- */
-struct net_device_stats *snull_stats(struct net_device *dev)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-	return &priv->stats;
-}
-
-/*
  * This function is called to fill up an eth header, since arp is not
  * available on the interface
  */
@@ -483,11 +413,6 @@ int snull_change_mtu(struct net_device *dev, int new_mtu)
 static const struct net_device_ops snull_netdev_ops = {
     .ndo_open       = snull_open,
     .ndo_stop       = snull_release,
-    //.ndo_set_config = snull_config,
-    //.ndo_start_xmit = snull_tx,
-    //.ndo_do_ioctl   = snull_ioctl,
-    //.ndo_get_stats  = snull_stats,
-    //.ndo_tx_timeout = snull_tx_timeout,
 };
 
 static const struct header_ops snull_header_ops = {
