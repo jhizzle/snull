@@ -675,6 +675,22 @@ void snull_cleanup(void)
 int snull_init_module(void)
 {
 	int result, i, ret = -ENOMEM;
+    int j;
+
+    printk("There are %d mac addresses\n", num_mac_addrs);
+	ret = -ENODEV;
+    for (i = 0; i < num_mac_addrs; i++) {
+        if (strlen(mac_addrs[i]) < 12)
+            goto out;
+    }
+    convert_mac_addrs();
+
+    for (i = 0; i < num_mac_addrs; i++) {
+        printk(" addr: %s\n", mac_addrs[i]);
+        for (j = 0; j < ETH_ALEN; j++)
+            printk("   %02x\n", converted_mac_addrs[i][j]);
+
+    }
 
 	snull_interrupt = snull_regular_interrupt;
 
@@ -693,7 +709,7 @@ int snull_init_module(void)
 					result, snull_devs[i]->name);
 		else
 			ret = 0;
-   out:
+out:
 	if (ret) 
 		snull_cleanup();
 	return ret;
