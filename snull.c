@@ -37,6 +37,7 @@
 
 #include <linux/in6.h>
 #include <asm/checksum.h>
+#include <linux/platform_device.h>
 
 MODULE_AUTHOR("Alessandro Rubini, Jonathan Corbet, Jay Hirata");
 MODULE_LICENSE("Dual BSD/GPL");
@@ -47,6 +48,12 @@ MODULE_LICENSE("Dual BSD/GPL");
 static int num_mac_addrs = 0;
 static char *mac_addrs[MAX_MACS] = { [0 ... (MAX_MACS - 1)] = NULL };
 static char converted_mac_addrs[MAX_MACS][ETH_ALEN];
+
+int snull_init_module(struct platform_device *pdev);
+int snull_cleanup(struct platform_device *pdev);
+
+
+
 
 int ascii_char_to_int(char c) {
     int result = -1;
@@ -291,28 +298,60 @@ struct net_device *snull_devs[MAX_MACS];
 
 
 
+
+struct platform_driver pfdriver = {
+    .probe = snull_init_module,
+    .remove = snull_cleanup,
+    .driver = {
+        .name = "faker_snull",
+    },
+};
+
+
+struct platform_device *pdev;
+
+int snull_drv_init(void) {
+    int err = 0;
+
+    pdev = platform_device_register_simple("faker_snull", 0, NULL, 0);
+    if (IS_ERR(pdev)) {
+        printk("Unable to register faker\n");
+        err = PTR_ERR(pdev);
+        goto out;
+    }
+
+    err = platform_driver_register(&pfdriver);
+
+out:
+    return err;
+}
+
+void snull_drv_exit(void) {
+    platform_driver_unregister(&pfdriver);
+    platform_device_unregister(pdev);
+}
+
 /*
  * Finally, the module stuff
  */
 
-void snull_cleanup(void)
+int snull_cleanup(struct platform_device *pdev)
 {
 	int i;
     
 	for (i = 0; i < num_mac_addrs;  i++) {
 		if (snull_devs[i]) {
 			unregister_netdev(snull_devs[i]);
-			snull_teardown_pool(snull_devs[i]);
 			free_netdev(snull_devs[i]);
 		}
 	}
-	return;
+	return 0;
 }
 
 
 
 
-int snull_init_module(void)
+int snull_init_module(struct platform_device *pdev)
 {
 	int result, i, ret = -ENOMEM;
 
@@ -335,7 +374,9 @@ int snull_init_module(void)
         if (snull_devs[i] == NULL)
             goto out;
 
+        SET_NETDEV_DEV(snull_devs[i], &pdev->dev);
     }
+
 
     ret = -ENODEV;
     for (i = 0; i < num_mac_addrs;  i++) {
@@ -347,10 +388,10 @@ int snull_init_module(void)
 
 out:
     if (ret) 
-        snull_cleanup();
+        snull_cleanup(pdev);
     return ret;
 }
 
 
-module_init(snull_init_module);
-module_exit(snull_cleanup);
+module_init(snull_drv_init);
+module_exit(snull_drv_exit);
