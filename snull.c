@@ -141,8 +141,6 @@ struct snull_priv {
 	spinlock_t lock;
 };
 
-static void (*snull_interrupt)(int, void *, struct pt_regs *);
-
 /*
  * Set up a device's packet pool.
  */
@@ -176,65 +174,6 @@ void snull_teardown_pool(struct net_device *dev)
 		/* FIXME - in-flight packets ? */
 	}
 }    
-
-/*
- * Buffer/pool management.
- */
-struct snull_packet *snull_get_tx_buffer(struct net_device *dev)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-	unsigned long flags;
-	struct snull_packet *pkt;
-    
-	spin_lock_irqsave(&priv->lock, flags);
-	pkt = priv->ppool;
-	priv->ppool = pkt->next;
-	if (priv->ppool == NULL) {
-		printk (KERN_INFO "Pool empty\n");
-		netif_stop_queue(dev);
-	}
-	spin_unlock_irqrestore(&priv->lock, flags);
-	return pkt;
-}
-
-
-void snull_release_buffer(struct snull_packet *pkt)
-{
-	unsigned long flags;
-	struct snull_priv *priv = netdev_priv(pkt->dev);
-	
-	spin_lock_irqsave(&priv->lock, flags);
-	pkt->next = priv->ppool;
-	priv->ppool = pkt;
-	spin_unlock_irqrestore(&priv->lock, flags);
-	if (netif_queue_stopped(pkt->dev) && pkt->next == NULL)
-		netif_wake_queue(pkt->dev);
-}
-
-void snull_enqueue_buf(struct net_device *dev, struct snull_packet *pkt)
-{
-	unsigned long flags;
-	struct snull_priv *priv = netdev_priv(dev);
-
-	spin_lock_irqsave(&priv->lock, flags);
-	pkt->next = priv->rx_queue;  /* FIXME - misorders packets */
-	priv->rx_queue = pkt;
-	spin_unlock_irqrestore(&priv->lock, flags);
-}
-
-struct snull_packet *snull_dequeue_buf(struct net_device *dev)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-	struct snull_packet *pkt;
-	unsigned long flags;
-
-	spin_lock_irqsave(&priv->lock, flags);
-	pkt = priv->rx_queue;
-	if (pkt != NULL)
-		priv->rx_queue = pkt->next;
-	spin_unlock_irqrestore(&priv->lock, flags);
-	return pkt;
-}
 
 /*
  * Enable and disable receive interrupts.
@@ -274,88 +213,6 @@ int snull_release(struct net_device *dev)
 }
 
 /*
- * Receive a packet: retrieve, encapsulate and pass over to upper levels
- */
-void snull_rx(struct net_device *dev, struct snull_packet *pkt)
-{
-	struct sk_buff *skb;
-	struct snull_priv *priv = netdev_priv(dev);
-
-	/*
-	 * The packet has been retrieved from the transmission
-	 * medium. Build an skb around it, so upper layers can handle it
-	 */
-	skb = dev_alloc_skb(pkt->datalen + 2);
-	if (!skb) {
-		if (printk_ratelimit())
-			printk(KERN_NOTICE "snull rx: low on mem - packet dropped\n");
-		priv->stats.rx_dropped++;
-		goto out;
-	}
-	skb_reserve(skb, 2); /* align IP on 16B boundary */  
-	memcpy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
-
-	/* Write metadata, and then pass to the receive level */
-	skb->dev = dev;
-	skb->protocol = eth_type_trans(skb, dev);
-	skb->ip_summed = CHECKSUM_UNNECESSARY; /* don't check it */
-	priv->stats.rx_packets++;
-	priv->stats.rx_bytes += pkt->datalen;
-	netif_rx(skb);
-  out:
-	return;
-}
-    
-
-/*
- * The typical interrupt entry point
- */
-static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-	int statusword;
-	struct snull_priv *priv;
-	struct snull_packet *pkt = NULL;
-	/*
-	 * As usual, check the "device" pointer to be sure it is
-	 * really interrupting.
-	 * Then assign "struct device *dev"
-	 */
-	struct net_device *dev = (struct net_device *)dev_id;
-	/* ... and check with hw if it's really ours */
-
-	/* paranoid */
-	if (!dev)
-		return;
-
-	/* Lock the device */
-	priv = netdev_priv(dev);
-	spin_lock(&priv->lock);
-
-	/* retrieve statusword: real netdevices use I/O instructions */
-	statusword = priv->status;
-	priv->status = 0;
-	if (statusword & SNULL_RX_INTR) {
-		/* send it to snull_rx for handling */
-		pkt = priv->rx_queue;
-		if (pkt) {
-			priv->rx_queue = pkt->next;
-			snull_rx(dev, pkt);
-		}
-	}
-	if (statusword & SNULL_TX_INTR) {
-		/* a transmission is over: free the skb */
-		priv->stats.tx_packets++;
-		priv->stats.tx_bytes += priv->tx_packetlen;
-		dev_kfree_skb(priv->skb);
-	}
-
-	/* Unlock the device and we are done */
-	spin_unlock(&priv->lock);
-	if (pkt) snull_release_buffer(pkt); /* Do this outside the lock! */
-	return;
-}
-
-/*
  * This function is called to fill up an eth header, since arp is not
  * available on the interface
  */
@@ -382,32 +239,6 @@ int snull_header(struct sk_buff *skb, struct net_device *dev,
 	memcpy(eth->h_dest,   daddr ? daddr : dev->dev_addr, dev->addr_len);
 	eth->h_dest[ETH_ALEN-1]   ^= 0x01;   /* dest is us xor 1 */
 	return (dev->hard_header_len);
-}
-
-
-
-
-
-/*
- * The "change_mtu" method is usually not needed.
- * If you need it, it must be like this.
- */
-int snull_change_mtu(struct net_device *dev, int new_mtu)
-{
-	unsigned long flags;
-	struct snull_priv *priv = netdev_priv(dev);
-	spinlock_t *lock = &priv->lock;
-    
-	/* check ranges */
-	if ((new_mtu < 68) || (new_mtu > 1500))
-		return -EINVAL;
-	/*
-	 * Do anything you need, and the accept the value
-	 */
-	spin_lock_irqsave(lock, flags);
-	dev->mtu = new_mtu;
-	spin_unlock_irqrestore(lock, flags);
-	return 0; /* success */
 }
 
 static const struct net_device_ops snull_netdev_ops = {
@@ -509,8 +340,6 @@ int snull_init_module(void)
             printk("   %02x\n", 0xff & converted_mac_addrs[i][j]);
 
     }
-
-	snull_interrupt = snull_regular_interrupt;
 
 	/* Allocate the devices */
     ret = -ENODEV;
