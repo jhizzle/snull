@@ -38,10 +38,66 @@
 #include <linux/in6.h>
 #include <asm/checksum.h>
 
-MODULE_AUTHOR("Alessandro Rubini, Jonathan Corbet");
+MODULE_AUTHOR("Alessandro Rubini, Jonathan Corbet, Jay Hirata");
 MODULE_LICENSE("Dual BSD/GPL");
 
 #define MAC_ADDR    { 0xc4, 0xd4, 0x89, 0xfb, 0xf8, 0xab }
+
+#define MAX_MACS                    20
+static int num_mac_addrs = 0;
+static char *mac_addrs[MAX_MACS] = { [0 ... (MAX_MACS - 1)] = NULL };
+static char converted_mac_addrs[MAX_MACS][ETH_ALEN];
+
+int ascii_char_to_int(char c) {
+    int result = -1;
+
+    if (c >= '0' && c <= '9')
+        result = c - '0';
+    else if (c >= 'a' && c <= 'f')
+        result = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F')
+        result = c - 'A' + 10;
+
+    return result;
+}
+
+unsigned char ascii_to_byte(char *str) {
+    unsigned char byte = 0;
+    int i;
+
+    i = ascii_char_to_int(str[0]);
+    if (i < 0)
+        return 0;
+
+    byte = (i << 4) & 0xff;
+
+    i = ascii_char_to_int(str[1]);
+    if (i < 0)
+        return 0;
+
+    byte |= i & 0xff;
+
+    return byte;
+}
+
+
+void convert_mac_addrs(void) {
+    int i, j;
+
+    for (i = 0; i < num_mac_addrs; i++) {
+        for (j = 0; j < ETH_ALEN; j++) {
+            converted_mac_addrs[i][j] = ascii_to_byte(&mac_addrs[i][j * 2]);
+        }
+    }
+}
+
+
+
+
+/*
+ * MAC addresses of devices to use.
+ */
+module_param_array(mac_addrs, charp, &num_mac_addrs, 0);
 
 /*
  * Transmitter lockup simulation, normally disabled.
@@ -83,9 +139,6 @@ struct snull_priv {
 	spinlock_t lock;
 };
 
-static void snull_tx_timeout(struct net_device *dev);
-static void (*snull_interrupt)(int, void *, struct pt_regs *);
-
 /*
  * Set up a device's packet pool.
  */
@@ -121,65 +174,6 @@ void snull_teardown_pool(struct net_device *dev)
 }    
 
 /*
- * Buffer/pool management.
- */
-struct snull_packet *snull_get_tx_buffer(struct net_device *dev)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-	unsigned long flags;
-	struct snull_packet *pkt;
-    
-	spin_lock_irqsave(&priv->lock, flags);
-	pkt = priv->ppool;
-	priv->ppool = pkt->next;
-	if (priv->ppool == NULL) {
-		printk (KERN_INFO "Pool empty\n");
-		netif_stop_queue(dev);
-	}
-	spin_unlock_irqrestore(&priv->lock, flags);
-	return pkt;
-}
-
-
-void snull_release_buffer(struct snull_packet *pkt)
-{
-	unsigned long flags;
-	struct snull_priv *priv = netdev_priv(pkt->dev);
-	
-	spin_lock_irqsave(&priv->lock, flags);
-	pkt->next = priv->ppool;
-	priv->ppool = pkt;
-	spin_unlock_irqrestore(&priv->lock, flags);
-	if (netif_queue_stopped(pkt->dev) && pkt->next == NULL)
-		netif_wake_queue(pkt->dev);
-}
-
-void snull_enqueue_buf(struct net_device *dev, struct snull_packet *pkt)
-{
-	unsigned long flags;
-	struct snull_priv *priv = netdev_priv(dev);
-
-	spin_lock_irqsave(&priv->lock, flags);
-	pkt->next = priv->rx_queue;  /* FIXME - misorders packets */
-	priv->rx_queue = pkt;
-	spin_unlock_irqrestore(&priv->lock, flags);
-}
-
-struct snull_packet *snull_dequeue_buf(struct net_device *dev)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-	struct snull_packet *pkt;
-	unsigned long flags;
-
-	spin_lock_irqsave(&priv->lock, flags);
-	pkt = priv->rx_queue;
-	if (pkt != NULL)
-		priv->rx_queue = pkt->next;
-	spin_unlock_irqrestore(&priv->lock, flags);
-	return pkt;
-}
-
-/*
  * Enable and disable receive interrupts.
  */
 static void snull_rx_ints(struct net_device *dev, int enable)
@@ -195,18 +189,15 @@ static void snull_rx_ints(struct net_device *dev, int enable)
 
 int snull_open(struct net_device *dev)
 {
-    char mac_addr[] = MAC_ADDR;
-	/* request_region(), request_irq(), ....  (like fops->open) */
+    int i;
 
-	/* 
-	 * Assign the hardware address of the board: use "\0SNULx", where
-	 * x is 0 or 1. The first byte is '\0' to avoid being a multicast
-	 * address (the first byte of multicast addrs is odd).
-	 */
-	//memcpy(dev->dev_addr, "\0SNUL0", ETH_ALEN);
-	memcpy(dev->dev_addr, mac_addr, ETH_ALEN);
-	if (dev == snull_devs[1])
-		dev->dev_addr[ETH_ALEN-1]++; /* \0SNUL1 */
+    /* Find the matching device */
+    for (i = 0; i < num_mac_addrs; i++) {
+        if (dev == snull_devs[i])
+            break;
+    }
+
+	memcpy(dev->dev_addr, converted_mac_addrs[i], ETH_ALEN);
 	netif_start_queue(dev);
 	return 0;
 }
@@ -217,261 +208,6 @@ int snull_release(struct net_device *dev)
 
 	netif_stop_queue(dev); /* can't transmit any more */
 	return 0;
-}
-
-/*
- * Configuration changes (passed on by ifconfig)
- */
-int snull_config(struct net_device *dev, struct ifmap *map)
-{
-	if (dev->flags & IFF_UP) /* can't act on a running interface */
-		return -EBUSY;
-
-	/* Don't allow changing the I/O address */
-	if (map->base_addr != dev->base_addr) {
-		printk(KERN_WARNING "snull: Can't change I/O address\n");
-		return -EOPNOTSUPP;
-	}
-
-	/* Allow changing the IRQ */
-	if (map->irq != dev->irq) {
-		dev->irq = map->irq;
-        	/* request_irq() is delayed to open-time */
-	}
-
-	/* ignore other fields */
-	return 0;
-}
-
-/*
- * Receive a packet: retrieve, encapsulate and pass over to upper levels
- */
-void snull_rx(struct net_device *dev, struct snull_packet *pkt)
-{
-	struct sk_buff *skb;
-	struct snull_priv *priv = netdev_priv(dev);
-
-	/*
-	 * The packet has been retrieved from the transmission
-	 * medium. Build an skb around it, so upper layers can handle it
-	 */
-	skb = dev_alloc_skb(pkt->datalen + 2);
-	if (!skb) {
-		if (printk_ratelimit())
-			printk(KERN_NOTICE "snull rx: low on mem - packet dropped\n");
-		priv->stats.rx_dropped++;
-		goto out;
-	}
-	skb_reserve(skb, 2); /* align IP on 16B boundary */  
-	memcpy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
-
-	/* Write metadata, and then pass to the receive level */
-	skb->dev = dev;
-	skb->protocol = eth_type_trans(skb, dev);
-	skb->ip_summed = CHECKSUM_UNNECESSARY; /* don't check it */
-	priv->stats.rx_packets++;
-	priv->stats.rx_bytes += pkt->datalen;
-	netif_rx(skb);
-  out:
-	return;
-}
-    
-
-/*
- * The typical interrupt entry point
- */
-static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-	int statusword;
-	struct snull_priv *priv;
-	struct snull_packet *pkt = NULL;
-	/*
-	 * As usual, check the "device" pointer to be sure it is
-	 * really interrupting.
-	 * Then assign "struct device *dev"
-	 */
-	struct net_device *dev = (struct net_device *)dev_id;
-	/* ... and check with hw if it's really ours */
-
-	/* paranoid */
-	if (!dev)
-		return;
-
-	/* Lock the device */
-	priv = netdev_priv(dev);
-	spin_lock(&priv->lock);
-
-	/* retrieve statusword: real netdevices use I/O instructions */
-	statusword = priv->status;
-	priv->status = 0;
-	if (statusword & SNULL_RX_INTR) {
-		/* send it to snull_rx for handling */
-		pkt = priv->rx_queue;
-		if (pkt) {
-			priv->rx_queue = pkt->next;
-			snull_rx(dev, pkt);
-		}
-	}
-	if (statusword & SNULL_TX_INTR) {
-		/* a transmission is over: free the skb */
-		priv->stats.tx_packets++;
-		priv->stats.tx_bytes += priv->tx_packetlen;
-		dev_kfree_skb(priv->skb);
-	}
-
-	/* Unlock the device and we are done */
-	spin_unlock(&priv->lock);
-	if (pkt) snull_release_buffer(pkt); /* Do this outside the lock! */
-	return;
-}
-
-/*
- * Transmit a packet (low level interface)
- */
-static void snull_hw_tx(char *buf, int len, struct net_device *dev)
-{
-	/*
-	 * This function deals with hw details. This interface loops
-	 * back the packet to the other snull interface (if any).
-	 * In other words, this function implements the snull behaviour,
-	 * while all other procedures are rather device-independent
-	 */
-	struct iphdr *ih;
-	struct net_device *dest;
-	struct snull_priv *priv;
-	u32 *saddr, *daddr;
-	struct snull_packet *tx_buffer;
-    
-	/* I am paranoid. Ain't I? */
-	if (len < sizeof(struct ethhdr) + sizeof(struct iphdr)) {
-		printk("snull: Hmm... packet too short (%i octets)\n",
-				len);
-		return;
-	}
-
-	if (0) { /* enable this conditional to look at the data */
-		int i;
-		PDEBUG("len is %i\n" KERN_DEBUG "data:",len);
-		for (i=14 ; i<len; i++)
-			printk(" %02x",buf[i]&0xff);
-		printk("\n");
-	}
-	/*
-	 * Ethhdr is 14 bytes, but the kernel arranges for iphdr
-	 * to be aligned (i.e., ethhdr is unaligned)
-	 */
-	ih = (struct iphdr *)(buf+sizeof(struct ethhdr));
-	saddr = &ih->saddr;
-	daddr = &ih->daddr;
-
-	((u8 *)saddr)[2] ^= 1; /* change the third octet (class C) */
-	((u8 *)daddr)[2] ^= 1;
-
-	ih->check = 0;         /* and rebuild the checksum (ip needs it) */
-	ih->check = ip_fast_csum((unsigned char *)ih,ih->ihl);
-
-	if (dev == snull_devs[0])
-		PDEBUGG("%08x:%05i --> %08x:%05i\n",
-				ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source),
-				ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest));
-	else
-		PDEBUGG("%08x:%05i <-- %08x:%05i\n",
-				ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest),
-				ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source));
-
-	/*
-	 * Ok, now the packet is ready for transmission: first simulate a
-	 * receive interrupt on the twin device, then  a
-	 * transmission-done on the transmitting device
-	 */
-	dest = snull_devs[dev == snull_devs[0] ? 1 : 0];
-	priv = netdev_priv(dest);
-	tx_buffer = snull_get_tx_buffer(dev);
-	tx_buffer->datalen = len;
-	memcpy(tx_buffer->data, buf, len);
-	snull_enqueue_buf(dest, tx_buffer);
-	if (priv->rx_int_enabled) {
-		priv->status |= SNULL_RX_INTR;
-		snull_interrupt(0, dest, NULL);
-	}
-
-	priv = netdev_priv(dev);
-	priv->tx_packetlen = len;
-	priv->tx_packetdata = buf;
-	priv->status |= SNULL_TX_INTR;
-	if (lockup && ((priv->stats.tx_packets + 1) % lockup) == 0) {
-        	/* Simulate a dropped transmit interrupt */
-		netif_stop_queue(dev);
-		PDEBUG("Simulate lockup at %ld, txp %ld\n", jiffies,
-				(unsigned long) priv->stats.tx_packets);
-	}
-	else
-		snull_interrupt(0, dev, NULL);
-}
-
-/*
- * Transmit a packet (called by the kernel)
- */
-int snull_tx(struct sk_buff *skb, struct net_device *dev)
-{
-	int len;
-	char *data, shortpkt[ETH_ZLEN];
-	struct snull_priv *priv = netdev_priv(dev);
-	
-	data = skb->data;
-	len = skb->len;
-	if (len < ETH_ZLEN) {
-		memset(shortpkt, 0, ETH_ZLEN);
-		memcpy(shortpkt, skb->data, skb->len);
-		len = ETH_ZLEN;
-		data = shortpkt;
-	}
-	dev->trans_start = jiffies; /* save the timestamp */
-
-	/* Remember the skb, so we can free it at interrupt time */
-	priv->skb = skb;
-
-	/* actual deliver of data is device-specific, and not shown here */
-	snull_hw_tx(data, len, dev);
-
-	return 0; /* Our simple device can not fail */
-}
-
-/*
- * Deal with a transmit timeout.
- */
-void snull_tx_timeout (struct net_device *dev)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-
-	PDEBUG("Transmit timeout at %ld, latency %ld\n", jiffies,
-			jiffies - dev->trans_start);
-        /* Simulate a transmission interrupt to get things moving */
-	priv->status = SNULL_TX_INTR;
-	snull_interrupt(0, dev, NULL);
-	priv->stats.tx_errors++;
-	netif_wake_queue(dev);
-	return;
-}
-
-
-
-/*
- * Ioctl commands 
- */
-int snull_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
-{
-	PDEBUG("ioctl\n");
-	return 0;
-}
-
-/*
- * Return statistics to the caller
- */
-struct net_device_stats *snull_stats(struct net_device *dev)
-{
-	struct snull_priv *priv = netdev_priv(dev);
-	return &priv->stats;
 }
 
 /*
@@ -503,40 +239,9 @@ int snull_header(struct sk_buff *skb, struct net_device *dev,
 	return (dev->hard_header_len);
 }
 
-
-
-
-
-/*
- * The "change_mtu" method is usually not needed.
- * If you need it, it must be like this.
- */
-int snull_change_mtu(struct net_device *dev, int new_mtu)
-{
-	unsigned long flags;
-	struct snull_priv *priv = netdev_priv(dev);
-	spinlock_t *lock = &priv->lock;
-    
-	/* check ranges */
-	if ((new_mtu < 68) || (new_mtu > 1500))
-		return -EINVAL;
-	/*
-	 * Do anything you need, and the accept the value
-	 */
-	spin_lock_irqsave(lock, flags);
-	dev->mtu = new_mtu;
-	spin_unlock_irqrestore(lock, flags);
-	return 0; /* success */
-}
-
 static const struct net_device_ops snull_netdev_ops = {
     .ndo_open       = snull_open,
     .ndo_stop       = snull_release,
-    .ndo_set_config = snull_config,
-    .ndo_start_xmit = snull_tx,
-    .ndo_do_ioctl   = snull_ioctl,
-    .ndo_get_stats  = snull_stats,
-    .ndo_tx_timeout = snull_tx_timeout,
 };
 
 static const struct header_ops snull_header_ops = {
@@ -569,23 +274,10 @@ void snull_init(struct net_device *dev)
 
     dev->netdev_ops = &snull_netdev_ops;
     dev->header_ops = &snull_header_ops;
-
-	//dev->open            = snull_open;
-	//dev->stop            = snull_release;
-	//dev->set_config      = snull_config;
-	//dev->hard_start_xmit = snull_tx;
-	//dev->do_ioctl        = snull_ioctl;
-	//dev->get_stats       = snull_stats;
-	//dev->change_mtu      = snull_change_mtu;  
-	/* dev->rebuild_header  = snull_rebuild_header; */
-	/* dev->hard_header     = snull_header; */
-	//dev->tx_timeout      = snull_tx_timeout;
 	dev->watchdog_timeo = timeout;
 
 	/* keep the default flags, just add NOARP */
 	dev->flags           |= IFF_NOARP;
-	//dev->features        |= NETIF_F_NO_CSUM;
-	/* dev->hard_header_cache = NULL;*/      /* Disable caching */
 
 	/*
 	 * Then, initialize the priv field. This encloses the statistics
@@ -602,7 +294,7 @@ void snull_init(struct net_device *dev)
  * The devices
  */
 
-struct net_device *snull_devs[2];
+struct net_device *snull_devs[MAX_MACS];
 
 
 
@@ -614,7 +306,7 @@ void snull_cleanup(void)
 {
 	int i;
     
-	for (i = 0; i < 2;  i++) {
+	for (i = 0; i < num_mac_addrs;  i++) {
 		if (snull_devs[i]) {
 			unregister_netdev(snull_devs[i]);
 			snull_teardown_pool(snull_devs[i]);
@@ -631,27 +323,39 @@ int snull_init_module(void)
 {
 	int result, i, ret = -ENOMEM;
 
-	snull_interrupt = snull_regular_interrupt;
+    printk("There are %d mac addresses\n", num_mac_addrs);
+	ret = -ENODEV;
+    for (i = 0; i < num_mac_addrs; i++) {
+        if (strlen(mac_addrs[i]) < 12)
+            goto out;
+    }
+    convert_mac_addrs();
+
+    for (i = 0; i < num_mac_addrs; i++) {
+        printk(" addr: %s\n", mac_addrs[i]);
+    }
 
 	/* Allocate the devices */
-	snull_devs[0] = alloc_netdev(sizeof(struct snull_priv), "eth%d",
-			snull_init);
-	snull_devs[1] = alloc_netdev(sizeof(struct snull_priv), "sn%d",
-			snull_init);
-	if (snull_devs[0] == NULL || snull_devs[1] == NULL)
-		goto out;
+    ret = -ENODEV;
+    for (i = 0; i < num_mac_addrs; i++) {
+        snull_devs[i] = alloc_netdev(sizeof(struct snull_priv), "eth%d", snull_init);
+        if (snull_devs[i] == NULL)
+            goto out;
 
-	ret = -ENODEV;
-	for (i = 0; i < 2;  i++)
-		if ((result = register_netdev(snull_devs[i])))
-			printk("snull: error %i registering device \"%s\"\n",
-					result, snull_devs[i]->name);
-		else
-			ret = 0;
-   out:
-	if (ret) 
-		snull_cleanup();
-	return ret;
+    }
+
+    ret = -ENODEV;
+    for (i = 0; i < num_mac_addrs;  i++) {
+        if ((result = register_netdev(snull_devs[i])))
+            printk("snull: error %i registering device \"%s\"\n", result, snull_devs[i]->name);
+        else
+            ret = 0;
+    }
+
+out:
+    if (ret) 
+        snull_cleanup();
+    return ret;
 }
 
 
